@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.log
+*.blend
+*.pmx
+*.pmd
+*.vvd
+*.mdl
+*.rpak
+*.starpak
+work/
+converted/
+runtime/
+*.zip
+pmxconv-settings.json

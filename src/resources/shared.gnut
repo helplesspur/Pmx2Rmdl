@@ -1,0 +1,269 @@
+#if SERVER
+global function CodeCallback_R5F_PMXConv_ModInit
+#endif
+#if CLIENT
+global function ClientCodeCallback_R5F_PMXConv_ModInit
+global function PMXConv_ToggleFrontCamera
+global function PMXConv_StopFrontCamera
+#endif
+
+#if SERVER || CLIENT
+const asset PMXCONV_BODY = $"@@MODEL@@"
+const asset PMXCONV_ARMS = $"@@ARMS@@"
+const array<string> PMXCONV_PHYSICS = @@BONES@@
+const bool PMXCONV_QA = false
+const array<string> PMXCONV_KEYS = @@KEYS@@
+const array<asset> PMXCONV_BODIES = @@BODIES@@
+const array<asset> PMXCONV_ARM_MODELS = @@ARM_MODELS@@
+const asset PMXCONV_AXLE_MENU = $"@@AXLE_MENU@@"
+#endif
+
+#if SERVER
+void function PMXConv_Command( entity player, array<string> args )
+{
+    if ( !IsValid( player ) || !GetConVarBool( "sv_cheats" ) || args.len() < 1 || args.len() > 2 )
+        return
+    if ( args[0] == "reset" )
+    {
+        if ( PMXCONV_BODIES.find( player.GetModelName() ) < 0 )
+            return
+        player.SetBodyModelOverride( $"" )
+        ItemFlavor character = LoadoutSlot_GetItemFlavor( ToEHI( player ), Loadout_Character() )
+        ItemFlavor skin = LoadoutSlot_GetItemFlavor( ToEHI( player ), Loadout_CharacterSkin( character ) )
+        player.SetArmsModelOverride( CharacterSkin_GetArmsModel( skin ) )
+    }
+    else
+    {
+        int index = PMXCONV_KEYS.find( args[0] )
+        if ( index < 0 )
+            return
+        if ( args.len() == 2 && args[1] != "first" && args[1] != "third" )
+            return
+        player.SetBodyModelOverride( PMXCONV_BODIES[index] )
+        if ( string( PMXCONV_ARM_MODELS[index] ) != "" )
+            player.SetArmsModelOverride( PMXCONV_ARM_MODELS[index] )
+        player.SetSkin( 0 )
+        player.SetFullBodygroup( 0 )
+    }
+    printt( "[PMXCONV] APPLIED", player.GetModelName() )
+}
+
+void function CodeCallback_R5F_PMXConv_ModInit()
+{
+    foreach ( asset model in PMXCONV_BODIES )
+        PrecacheModel( model )
+    foreach ( asset model in PMXCONV_ARM_MODELS )
+        if ( string( model ) != "" )
+            PrecacheModel( model )
+    if ( string(PMXCONV_AXLE_MENU)!="" )
+        PrecacheModel(PMXCONV_AXLE_MENU)
+    AddClientCommandCallback( "pmx_model", PMXConv_Command )
+    printt( "[PMXCONV] server ready", PMXCONV_BODY )
+}
+#endif
+
+#if CLIENT
+struct { bool started = false } pmxQA
+struct
+{
+    bool active = false
+    int generation = 0
+    entity camera
+} pmxFront
+
+void function PMXConv_StopFrontCamera()
+{
+    pmxFront.active = false
+}
+
+void function PMXConv_ToggleFrontCamera()
+{
+    if ( pmxFront.active )
+    {
+        PMXConv_StopFrontCamera()
+        return
+    }
+    if ( IsValid( pmxFront.camera ) )
+        return
+    entity player = GetLocalClientPlayer()
+    if ( !IsValid( player ) || !IsAlive( player ) )
+        return
+    pmxFront.active = true
+    pmxFront.generation++
+    thread PMXConv_FrontCamera( player, pmxFront.generation )
+}
+
+void function PMXConv_FrontCamera( entity player, int generation )
+{
+    player.EndSignal( "OnDestroy" )
+    bool wasThird = player.IsThirdPersonShoulderModeOn()
+    entity camera = CreateClientSidePointCamera( player.EyePosition(), <0,0,0>, 65.0 )
+    pmxFront.camera = camera
+    OnThreadEnd( function() : ( player, camera, wasThird, generation )
+    {
+        if ( IsValid( player ) )
+        {
+            player.ClearMenuCameraEntity()
+            if ( !wasThird && player.IsThirdPersonShoulderModeOn() )
+                ClientCommand( "ToggleThirdPerson" )
+        }
+        if ( IsValid( camera ) )
+            camera.Destroy()
+        if ( pmxFront.generation == generation )
+        {
+            pmxFront.active = false
+            pmxFront.camera = null
+        }
+        printt( "[PMXCONV-CAMERA] RESTORED", wasThird )
+    } )
+    if ( !wasThird )
+        ClientCommand( "ToggleThirdPerson" )
+    wait 0.25
+    player.SetMenuCameraEntity( camera )
+    printt( "[PMXCONV-CAMERA] FRONT_ON" )
+    while ( pmxFront.active && pmxFront.generation == generation && IsAlive( player ) && player.IsThirdPersonShoulderModeOn() )
+    {
+        vector target = player.GetOrigin() + <0,0,48>
+        int head = player.LookupBone( "def_c_head" )
+        if ( string( player.GetModelName() ).find( "mdl/pmxconv/" ) == 0 )
+            head = player.LookupBone( "def_c_neckB" )
+        if ( head >= 0 )
+            target.z = player.GetBoneOrigin( head ).z - 10.0
+        vector forward = AnglesToForward( <0,player.GetAngles().y,0> )
+        vector desired = target + forward * 110.0 + <0,0,5>
+        TraceResults trace = TraceLine( target, desired, [player], TRACE_MASK_PLAYERSOLID, TRACE_COLLISION_GROUP_NONE )
+        vector position = trace.endPos - forward * 3.0
+        camera.SetOrigin( position )
+        camera.SetAngles( VectorToAngles( target - position ) )
+        WaitFrame()
+    }
+}
+
+void function PMXConv_Prime( entity player )
+{
+    foreach ( string name in PMXCONV_PHYSICS )
+    {
+        int bone = player.LookupBone( name )
+        if ( bone >= 0 )
+        {
+            player.GetBoneOrigin( bone )
+            player.GetBoneAngles( bone )
+        }
+    }
+}
+
+void function PMXConv_Sample( entity player, string stage )
+{
+    printt( "[PMXCONV-QA] STATE", stage, player.GetModelName(),
+        player.GetCurrentSequenceName(), player.GetCycle(), player.IsThirdPersonShoulderModeOn(), player.GetVelocity() )
+    foreach ( string name in PMXCONV_PHYSICS )
+    {
+        int bone = player.LookupBone( name )
+        if ( bone < 0 )
+            printt( "[PMXCONV-QA] MISSING", name )
+        else
+            printt( "[PMXCONV-QA] BONE", stage, name,
+                player.GetBoneOrigin( bone ) - player.GetOrigin(), player.GetBoneAngles( bone ) )
+    }
+}
+
+void function PMXConv_QARun( entity player )
+{
+    player.EndSignal( "OnDestroy" )
+    wait 24.0
+    int original = GetConVarInt( "r_jiggle_bones" )
+    printt( "[PMXCONV-QA] CVAR", original, GetConVarInt( "cl_jiggle_bone_invert" ), GetConVarInt( "cl_jiggle_bone_sanity" ) )
+    ClientCommand( "r_jiggle_bones 0" )
+    wait 0.5
+    if ( !player.IsThirdPersonShoulderModeOn() )
+        ClientCommand( "ToggleThirdPerson" )
+    ClientCommand( "pmx_model @@NAME@@" )
+    wait 8.0
+    if ( string( player.GetModelName() ) != string( PMXCONV_BODY ) )
+    {
+        printt( "[PMXCONV-QA] FAIL apply", player.GetModelName() )
+        return
+    }
+    ClientCommand( "r_jiggle_bones 0" )
+    wait 2.0
+    PMXConv_Sample( player, "disabled" )
+    ClientCommand( "screenshot" )
+    ClientCommand( "r_jiggle_bones 1" )
+    for ( int i = 0; i < 20; i++ )
+    {
+        PMXConv_Prime( player )
+        wait 0.1
+    }
+    wait 6.0
+    PMXConv_Sample( player, "rest" )
+    ClientCommand( "screenshot" )
+    ClientCommand( "+moveleft" )
+    for ( int i = 0; i < 12; i++ )
+    {
+        PMXConv_Prime( player )
+        wait 0.1
+    }
+    PMXConv_Sample( player, "moving" )
+    ClientCommand( "-moveleft" )
+    for ( int i = 0; i < 60; i++ )
+    {
+        PMXConv_Prime( player )
+        wait 0.1
+    }
+    PMXConv_Sample( player, "settled" )
+    ClientCommand( "screenshot" )
+    ClientCommand( "r_jiggle_bones " + original )
+    printt( "[PMXCONV-QA] COMPLETE" )
+}
+
+void function PMXConv_OnSpawn( entity player )
+{
+    if ( !PMXCONV_QA || pmxQA.started )
+        return
+    pmxQA.started = true
+    thread PMXConv_QARun( player )
+}
+
+void function PMXConv_QAWait()
+{
+    wait 30.0
+    while ( !pmxQA.started )
+    {
+        entity player = GetLocalClientPlayer()
+        if ( IsValid( player ) && IsAlive( player ) )
+        {
+            PMXConv_OnSpawn( player )
+            return
+        }
+        wait 0.5
+    }
+}
+
+void function ClientCodeCallback_R5F_PMXConv_ModInit()
+{
+    foreach ( asset model in PMXCONV_BODIES )
+        PrecacheModel( model )
+    foreach ( asset model in PMXCONV_ARM_MODELS )
+        if ( string( model ) != "" )
+            PrecacheModel( model )
+    if ( string(PMXCONV_AXLE_MENU) != "" )
+    {
+        PrecacheModel(PMXCONV_AXLE_MENU)
+        AddCallback_OnCharacterSelectModelChanged( PMXConv_CharacterSelectModel )
+    }
+    if ( PMXCONV_QA )
+        thread PMXConv_QAWait()
+    printt( "[PMXCONV] client ready", PMXCONV_BODY )
+}
+
+void function PMXConv_CharacterSelectModel( ItemFlavor character, entity model, entity backgroundGeo, entity backgroundSmoke, var backgroundRui )
+{
+    int index = PMXCONV_KEYS.find( "lucy" )
+    if ( index < 0 || string(PMXCONV_AXLE_MENU)=="" || !IsValid( model ) || ItemFlavor_GetAsset( character ) != $"settings/itemflav/character/overdrive.rpak" )
+        return
+    model.SetModel( PMXCONV_AXLE_MENU )
+    model.SetModelScale( 0.94 )
+    model.SetSkin( 0 )
+    printt( "[PMXCONV] Axle selection model", model.GetModelName() )
+}
+#endif
